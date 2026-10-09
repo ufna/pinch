@@ -6,6 +6,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPaintEvent>
 #include <QWheelEvent>
 
 ScreenView::ScreenView(OverlayController* controller, QRect imageRect, QWidget* parent)
@@ -14,6 +15,7 @@ ScreenView::ScreenView(OverlayController* controller, QRect imageRect, QWidget* 
     , m_imageRect(imageRect)
 {
     resize(m_imageRect.size());
+    setAttribute(Qt::WA_OpaquePaintEvent);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
     setCursor(Qt::CrossCursor);
@@ -24,13 +26,19 @@ QPoint ScreenView::toImage(const QPointF& local) const
     return local.toPoint() + m_imageRect.topLeft();
 }
 
-void ScreenView::paintEvent(QPaintEvent*)
+void ScreenView::paintEvent(QPaintEvent* event)
 {
     if (!m_controller)
         return;
     QPainter painter(this);
     painter.translate(-m_imageRect.topLeft());
-    m_controller->paint(painter, m_imageRect);
+    for (const QRect& rect : event->region()) {
+        painter.save();
+        const QRect imageArea = rect.translated(m_imageRect.topLeft());
+        painter.setClipRect(imageArea);
+        m_controller->paint(painter, imageArea);
+        painter.restore();
+    }
 }
 
 // Окно, получившее нажатие, получает и все движения до отпускания (неявный захват указателя), даже за своими

@@ -15,6 +15,7 @@
 #include <QKeyEvent>
 #include <QMessageBox>
 #include <QPainter>
+#include <QRegion>
 #include <QTextStream>
 
 #include <utility>
@@ -29,6 +30,20 @@ constexpr int kMaxThickness = 40;
 QColor accentColor()
 {
     return QColor(0x3D, 0x8B, 0xFD);
+}
+
+QString sizeLabelText(const QRect& selection)
+{
+    return QStringLiteral("%1×%2").arg(selection.width()).arg(selection.height());
+}
+
+// Эту плашку рисует paintSizeLabel и перерисовывает updateViews — расходиться они не должны.
+QRect sizeLabelRect(const QRect& selection, const QString& text, const QFont& font, const QVector<QRect>& screens)
+{
+    const QFontMetrics metrics(font);
+    const QSize size(metrics.horizontalAdvance(text) + 12, metrics.height() + 6);
+    // Над выделением, если там есть видимая часть монитора; иначе внутри, на видимом мониторе.
+    return QRect(sizeLabelPosition(selection, size, screens), size);
 }
 }
 
@@ -230,17 +245,41 @@ void OverlayController::updateCursor(QPoint pos)
 void OverlayController::setViewsCursor(Qt::CursorShape shape)
 {
     for (const QPointer<ScreenView>& view : std::as_const(m_views)) {
-        if (view)
+        if (view && view->cursor().shape() != shape)
             view->setCursor(shape);
     }
 }
 
 void OverlayController::updateViews()
 {
-    for (const QPointer<ScreenView>& view : std::as_const(m_views)) {
-        if (view)
-            view->update();
+    QRegion dirty(bounds());
+    if (m_drag == Drag::Selecting && !m_selection.isEmpty() && !m_previousSelection.isEmpty()) {
+        // При выделении общая часть старого и нового прямоугольника не меняется: перерисовываются только
+        // изменившиеся полосы, старые и новые рамки с маркерами и подписи размера.
+        dirty = QRegion(m_selection).xored(QRegion(m_previousSelection));
+        for (const QRect& selection : {m_previousSelection, m_selection}) {
+            dirty += QRegion(selection.adjusted(-kHandleSize, -kHandleSize, kHandleSize, kHandleSize))
+                .subtracted(QRegion(selection.adjusted(kHandleSize, kHandleSize, -kHandleSize, -kHandleSize)));
+            const QString text = sizeLabelText(selection);
+            for (const QPointer<ScreenView>& view : std::as_const(m_views)) {
+                if (!view)
+                    continue;
+                dirty += sizeLabelRect(selection, text, view->font(), m_capture.screens).adjusted(-2, -2, 2, 2);
+            }
+        }
     }
+    for (const QPointer<ScreenView>& view : std::as_const(m_views)) {
+        if (!view)
+            continue;
+        if (m_selection.isEmpty() && m_previousSelection.isEmpty()) {
+            view->update();
+        } else {
+            const QRegion local = dirty.intersected(view->imageRect()).translated(-view->imageRect().topLeft());
+            if (!local.isEmpty())
+                view->update(local);
+        }
+    }
+    m_previousSelection = m_selection;
 }
 
 QRect OverlayController::screenAt(QPoint pos) const
@@ -668,11 +707,20 @@ void OverlayController::paint(QPainter& painter, const QRect& imageRect) const
             paintHint(painter);
         return;
     }
-    if (!m_cacheValid) {
-        m_cache = ::render(m_capture.image, m_selection, m_document.annotations());
-        m_cacheValid = true;
+    if (m_document.annotations().isEmpty()) {
+        // Без аннотаций выделение рисуется прямо из снимка, без промежуточной копии.
+        const QRect visible = m_selection.intersected(imageRect);
+        if (!visible.isEmpty())
+            painter.drawImage(visible.topLeft(), m_capture.image, visible);
+    } else {
+        if (!m_cacheValid) {
+            m_cache = ::render(m_capture.image, m_selection, m_document.annotations());
+            m_cacheValid = true;
+        }
+        const QRect visible = m_selection.intersected(imageRect);
+        if (!visible.isEmpty())
+            painter.drawImage(visible.topLeft(), m_cache, visible.translated(-m_selection.topLeft()));
     }
-    painter.drawImage(m_selection.topLeft(), m_cache);
     paintCurrent(painter);
     paintSelectionFrame(painter);
     paintSizeLabel(painter);
@@ -697,12 +745,8 @@ void OverlayController::paintSelectionFrame(QPainter& painter) const
 
 void OverlayController::paintSizeLabel(QPainter& painter) const
 {
-    const QString text = QStringLiteral("%1×%2").arg(m_selection.width()).arg(m_selection.height());
-    const QFontMetrics metrics(painter.font());
-    const QSize size(metrics.horizontalAdvance(text) + 12, metrics.height() + 6);
-    // Над выделением, если там есть видимая часть монитора; иначе внутри, на видимом мониторе.
-    const QPoint topLeft = sizeLabelPosition(m_selection, size, m_capture.screens);
-    const QRect box(topLeft, size);
+    const QString text = sizeLabelText(m_selection);
+    const QRect box = sizeLabelRect(m_selection, text, painter.font(), m_capture.screens);
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 160));
     painter.drawRoundedRect(box, 4, 4);

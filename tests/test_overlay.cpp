@@ -8,6 +8,7 @@
 
 #include <QLocale>
 #include <QPainter>
+#include <QPaintEvent>
 #include <QToolButton>
 
 namespace {
@@ -178,6 +179,47 @@ private slots:
         drag(e, {10, 10}, {110, 60});
         QCOMPARE(e.ctl.selection(), QRect(10, 10, 101, 51));
         QVERIFY(e.ctl.toolbar()->isVisible());
+    }
+
+    void selectionRepaintsOnlyChangedStrips()
+    {
+        Env e;
+        struct Recorder : QObject {
+            OverlayController* controller;
+            QImage frame{400, 300, QImage::Format_RGB32};
+            QRegion dirty;
+            bool eventFilter(QObject*, QEvent* event) override {
+                if (event->type() == QEvent::Paint) {
+                    const QRegion region = static_cast<QPaintEvent*>(event)->region();
+                    dirty += region;
+                    QPainter painter(&frame);
+                    for (const QRect& rect : region) {
+                        painter.setClipRect(rect);
+                        controller->paint(painter, rect);
+                    }
+                }
+                return false;
+            }
+        } recorder;
+        recorder.controller = &e.ctl;
+        e.view()->installEventFilter(&recorder);
+        e.view()->update();
+        QApplication::processEvents();
+        mouse(e, QEvent::MouseButtonPress, {20, 40}, Qt::LeftButton, Qt::LeftButton);
+        mouse(e, QEvent::MouseMove, {350, 260}, Qt::NoButton, Qt::LeftButton);
+        QApplication::processEvents();
+        for (const QPoint end : {QPoint(355, 265), QPoint(340, 250)}) {
+            recorder.dirty = {};
+            mouse(e, QEvent::MouseMove, end, Qt::NoButton, Qt::LeftButton);
+            QApplication::processEvents();
+            QVERIFY(!recorder.dirty.isEmpty());
+            QVERIFY(!recorder.dirty.contains(QPoint(180, 150)));
+            QImage expected(400, 300, QImage::Format_RGB32);
+            QPainter painter(&expected);
+            e.ctl.paint(painter, expected.rect());
+            painter.end();
+            QCOMPARE(recorder.frame, expected);
+        }
     }
 
     void clickSelectsScreen()
